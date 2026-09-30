@@ -87,14 +87,14 @@ def parse_clutch_agencies(html: str) -> List[Dict[str, str]]:
     """
     soup = BeautifulSoup(html, "html.parser")
     # Tarjetas de proveedores en Clutch
-    cards = soup.select(".provider-row, li.provider-row, .directory-list li.provider")
+    cards = soup.select(".provider-row, li.provider-row, .directory-list li.provider, li[data-provider-id], div[data-provider-id]")
     
     agencies: List[Dict[str, str]] = []
     seen_names = set()
 
     for card in cards:
         # 1. Nombre de la empresa
-        name_el = card.select_one("a.company_title, .company_info a, .provider__title a, h3 a")
+        name_el = card.select_one("h3.company_info a, a.company_title, .company_info a, .provider__title a, h3 a, h2 a, a[data-link_text='Profile Name']")
         raw_name = name_el.get_text(strip=True) if name_el else ""
         clean_name = clean_company_name(raw_name)
         
@@ -102,31 +102,34 @@ def parse_clutch_agencies(html: str) -> List[Dict[str, str]]:
             continue
             
         # 2. Ciudad / Ubicacion
-        loc_el = card.select_one(".locality, .location, .provider-detail__item--location, .provider__highlights-item--location")
+        loc_el = card.select_one(".locality, .location, .provider-detail__item--location, .provider__highlights-item--location, span[data-content*='Location']")
         raw_loc = loc_el.get_text(strip=True) if loc_el else ""
         city = clean_city_string(raw_loc)
         
         # 3. Presupuesto minimo (Min_Project_Size)
         min_proj_el = card.select_one(
             ".min-project-size, [class*='min-project-size'], "
-            ".provider__highlights-item.sg-tooltip-v2"
+            ".provider__highlights-item.sg-tooltip-v2, span[data-content*='Min. project size'], div.list-item"
         )
         min_project_size = "N/A"
         if min_proj_el:
             min_project_size = min_proj_el.get_text(strip=True)
-        else:
-            # Fallback buscando en items de caracteristicas
-            highlights = card.select(".provider__highlights-item")
+            if "$" not in min_project_size and "Undisclosed" not in min_project_size:
+                min_project_size = "N/A"
+
+        if min_project_size == "N/A":
+            # Fallback buscando en items de caracteristicas usando regex
+            highlights = card.select(".provider__highlights-item, .list-item, div.sg-tooltip-v2")
             for h in highlights:
                 txt = h.get_text(strip=True)
-                if "$" in txt and ("+" in txt or "<" in txt or "," in txt):
+                if ("$" in txt and ("+" in txt or "<" in txt or "," in txt)) or "Undisclosed" in txt:
                     min_project_size = txt
                     break
                     
         # 4. Enlace al sitio web oficial
         web_el = card.select_one(
             "a.website-link__item, a.visit-website, a[data-link_text='website'], "
-            "a[href*='clutch.co/redirect'], a[href*='visit_website']"
+            "a[data-link_text='Visit Website'], a[href*='clutch.co/redirect'], a[href*='visit_website'], li.website-link a"
         )
         raw_web = web_el.get("href") if web_el else ""
         clean_web = extract_real_website_url(raw_web)
@@ -247,6 +250,15 @@ async def run_clutch_scraper(
         if c not in df.columns:
             df[c] = ""
     df = df[cols]
+
+    # Filtrado estricto: eliminar filas sin Email O sin Website valido
+    # Reemplazar strings vacias o "N/A" con pd.NA y aplicar dropna
+    df.replace("", pd.NA, inplace=True)
+    df.replace("N/A", pd.NA, inplace=True)
+    df.dropna(subset=["Email", "Website"], inplace=True)
+
+    # Restaurar N/A o strings vacios en caso de que lo necesitemos en otras columnas
+    df.fillna("N/A", inplace=True)
 
     # Guardar en Excel
     df.to_excel(output_path, index=False, engine="openpyxl")

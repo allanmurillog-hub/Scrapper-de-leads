@@ -23,7 +23,8 @@ BLOCKED_EMAIL_KEYWORDS = {
     "sentry", "wixpress", "example.com", "domain.com", 
     "email.com", "yourdomain", "test@", "schema.org",
     "git@", "noreply", "no-reply", "donotreply", "privacy@",
-    "abuse@", "mailer-daemon", "user@", "wght@", "font@", "rating@"
+    "abuse@", "mailer-daemon", "user@", "wght@", "font@", "rating@",
+    "dummy", "email@", "info@example.com", ".png", ".jpg", ".webp"
 }
 
 HEADERS = {
@@ -117,14 +118,23 @@ def extract_real_website_url(url: str) -> str:
     """
     if not url or url == "N/A":
         return ""
+
+    target_url = url
     if "clutch.co/redirect" in url:
         parsed = urllib.parse.urlparse(url)
         qs = urllib.parse.parse_qs(parsed.query)
         if "u" in qs and qs["u"]:
-            target = urllib.parse.unquote(qs["u"][0])
-            # Quitar parametros UTM de tracking
-            return target.split("?")[0].rstrip("/")
-    return url.split("?")[0].rstrip("/")
+            target_url = urllib.parse.unquote(qs["u"][0])
+
+    # Resolve any redirects by making a request
+    try:
+        resp = requests.head(target_url, allow_redirects=True, timeout=5, headers=HEADERS)
+        if resp.url:
+            target_url = resp.url
+    except Exception:
+        pass
+
+    return target_url.split("?")[0].rstrip("/")
 
 def extract_emails_from_site(website_url: str, timeout: int = 7) -> str:
     """
@@ -140,27 +150,21 @@ def extract_emails_from_site(website_url: str, timeout: int = 7) -> str:
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # 1. Probar en la pagina principal
+    # Ping the resolved domain to see if it's alive before crawling
     try:
-        resp = session.get(real_url, timeout=timeout, allow_redirects=True)
-        if resp.status_code == 200:
-            for match in EMAIL_REGEX.findall(resp.text):
-                if is_valid_email(match):
-                    found_emails.add(match.lower())
+        ping_resp = session.get(real_url, timeout=5, allow_redirects=True)
+        if ping_resp.status_code not in (200, 401, 403): # Consider 401/403 as alive, as they might have a readable body or we might get lucky, but 404/500 are bad. Actually, let's just abort if it's 404 or 500+ as requested.
+            if ping_resp.status_code >= 400:
+                return ""
+
+        # We successfully pinged, so let's process the text of this response
+        for match in EMAIL_REGEX.findall(ping_resp.text):
+            if is_valid_email(match):
+                found_emails.add(match.lower())
     except Exception:
-        pass
+        return ""
 
-    if found_emails:
-        # Priorizar correos corporativos como contact@, info@, hello@
-        sorted_emails = sorted(
-            list(found_emails),
-            key=lambda e: (
-                0 if any(p in e for p in ["contact", "info", "hello", "sales", "office"]) else 1
-            )
-        )
-        return sorted_emails[0]
-
-    # 2. Si no hubo exito en la Home, probar en subpaginas comunes
+    # 2. Always check contact/about pages to maximize finding a valid email
     contact_endpoints = ["/contact", "/contact-us", "/about", "/about-us"]
     base_domain = f"{urllib.parse.urlparse(real_url).scheme}://{urllib.parse.urlparse(real_url).netloc}"
     
@@ -172,8 +176,6 @@ def extract_emails_from_site(website_url: str, timeout: int = 7) -> str:
                 for match in EMAIL_REGEX.findall(sub_resp.text):
                     if is_valid_email(match):
                         found_emails.add(match.lower())
-                if found_emails:
-                    break
         except Exception:
             continue
 
