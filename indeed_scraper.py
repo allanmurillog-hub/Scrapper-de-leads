@@ -85,7 +85,7 @@ def parse_indeed_jobs(html: str) -> List[Dict[str, str]]:
     # Tarjetas de ofertas de Indeed
     cards = soup.select(
         ".job_seen_beacon, div[class*='job_seen_beacon'], "
-        "td.resultContent, .jobCard_mainContent"
+        "td.resultContent, .jobCard_mainContent, li.css-5lfssm"
     )
 
     jobs: List[Dict[str, str]] = []
@@ -95,19 +95,19 @@ def parse_indeed_jobs(html: str) -> List[Dict[str, str]]:
         # 1. Titulo del puesto (Job_Title)
         title_el = card.select_one(
             "h2.jobTitle span[title], h2.jobTitle a, "
-            "h2.jobTitle span, a[data-jk]"
+            "h2.jobTitle span, a[data-jk], h2[id^='jobTitle'] span"
         )
         job_title = title_el.get_text(strip=True) if title_el else ""
         if not job_title or job_title.lower() == "new":
             # Si el span tomo la etiqueta 'new', buscar elemento hermano o padre
-            parent = card.select_one("h2.jobTitle")
+            parent = card.select_one("h2.jobTitle, h2[id^='jobTitle']")
             if parent:
                 job_title = parent.get_text(strip=True).replace("new", "").strip()
 
         # 2. Nombre de la empresa (Business_Name)
         comp_el = card.select_one(
             "span[data-testid='company-name'], .companyName, "
-            "[data-testid='company-name']"
+            "[data-testid='company-name'], [data-company-name]"
         )
         raw_company = comp_el.get_text(strip=True) if comp_el else ""
         clean_company = clean_company_name(raw_company)
@@ -116,7 +116,7 @@ def parse_indeed_jobs(html: str) -> List[Dict[str, str]]:
             continue
 
         # 3. Ciudad aislada (City)
-        loc_el = card.select_one("div[data-testid='text-location'], .companyLocation")
+        loc_el = card.select_one("div[data-testid='text-location'], .companyLocation, [data-testid='myJobsStateDate']")
         raw_loc = loc_el.get_text(strip=True) if loc_el else ""
         city = clean_city_string(raw_loc)
 
@@ -137,7 +137,11 @@ def parse_indeed_jobs(html: str) -> List[Dict[str, str]]:
         if comp_link_el:
             cmp_href = comp_link_el.get("href", "")
             if cmp_href:
-                website = urllib.parse.urljoin("https://www.indeed.com", cmp_href)
+                # Si en el HTML ya tienen web saliente (a veces Indeed lo oculta tras redirects en páginas directas)
+                if cmp_href.startswith("http") and "indeed.com" not in cmp_href:
+                    website = cmp_href
+                else:
+                    website = urllib.parse.urljoin("https://www.indeed.com", cmp_href)
 
         unique_key = f"{clean_company.lower()}_{job_title.lower()}"
         if unique_key in seen_keys:
@@ -259,6 +263,12 @@ async def run_indeed_scraper(
         if c not in df.columns:
             df[c] = ""
     df = df[cols]
+
+    # Filtrado estricto: eliminar filas sin Email O sin Website valido
+    df.replace("", pd.NA, inplace=True)
+    df.replace("N/A", pd.NA, inplace=True)
+    df.dropna(subset=["Email", "Website"], inplace=True)
+    df.fillna("N/A", inplace=True)
 
     # Guardar en Excel
     df.to_excel(output_path, index=False, engine="openpyxl")
